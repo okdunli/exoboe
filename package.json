@@ -1,6 +1,6 @@
 {
   "name": "xoboe",
-  "version": "0.1.2",
+  "version": "0.1.3",
 
   "license": "MIT",
   "description": "xoboe rebuilt on rosefn: dynamic full-stack blog, per-request DB rendering, Node runtime",
