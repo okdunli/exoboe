@@ -28,9 +28,11 @@ import {
   rmSync,
   existsSync,
   readFileSync,
+  writeFileSync,
   mkdirSync,
   cpSync,
   symlinkSync,
+  readdirSync,
 } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -38,8 +40,6 @@ import { tmpdir } from 'os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const STAGE = join(tmpdir(), 'xoboe-stage');
-
-rmSync(join(ROOT, 'server.js'), { force: true });
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -57,6 +57,18 @@ function retry(label, fn, tries = 20) {
   throw new Error(label + ' failed after retries: ' + last.message);
 }
 
+/** File count under dir, for the deploy-root mirror report. */
+function countFiles(dir) {
+  let n = 0;
+  (function walk(d) {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(join(d, e.name));
+      else if (e.isFile()) n++;
+    }
+  })(dir);
+  return n;
+}
+
 function junction(target, link) {
   symlinkSync(target, link, 'junction');
 }
@@ -70,7 +82,7 @@ const binField = JSON.parse(readFileSync(join(ROOT, 'node_modules/tsx/package.js
 const tsxCli = join(ROOT, 'node_modules/tsx', typeof binField === 'string' ? binField : binField.tsx);
 
 console.log('[build] staging in', STAGE);
-for (const name of ['node_modules', 'src', 'themes', 'plugins', 'xoboe', 'tools', 'dist']) {
+for (const name of ['node_modules', 'src', 'themes', 'plugins', 'xoboe', 'tools', 'dist', 'seed']) {
   try { rmSync(join(STAGE, name), { force: true }); } catch { /* link missing, fine */ }
 }
 retry('stage reset', () => rmSync(STAGE, { recursive: true, force: true }));
@@ -110,10 +122,44 @@ retry('public mirror', () =>
   cpSync(join(STAGE, 'xoboe', 'public'), join(ROOT, 'xoboe', 'public'), { recursive: true }),
 );
 
-rmSync(join(ROOT, 'server.js'), { force: true });
-if (existsSync(join(ROOT, 'server.js'))) {
-  console.error('[build] FATAL: root server.js survived the build at', join(ROOT, 'server.js'));
-  process.exit(1);
+const rootPublic = join(ROOT, 'public');
+retry('deploy-root public', () => {
+  rmSync(rootPublic, { recursive: true, force: true });
+  cpSync(join(STAGE, 'xoboe', 'public'), rootPublic, { recursive: true });
+});
+console.log(`[build] deploy-root public/ -> ${countFiles(rootPublic)} files (Vercel static glob)`);
+
+const distServer = join(ROOT, 'dist', 'server.js');
+if (existsSync(distServer)) {
+  const src = readFileSync(distServer, 'utf8');
+  if (!/\bexport\s+default\b/.test(src)) {
+    const banner = [
+      '',
+      '// --- Vercel lambda entry shim (appended by tools/build.mjs) ---',
+      '// The Vercel lambda names its handler server.js and keys bundle files by',
+      '// basename, so this file can shadow the intended entry. Exporting a',
+      '// request function keeps the launcher contract satisfied regardless of',
+      '// which file wins: it must be a function or a server.',
+      "import __xoboeProd from './prod.mjs';",
+      'const __xoboeServer = __xoboeProd && __xoboeProd.default ? __xoboeProd.default : __xoboeProd;',
+      'export default function xoboeVercelHandler(req, res) {',
+      "  if (!__xoboeServer || typeof __xoboeServer.emit !== 'function') {",
+      '    res.statusCode = 500;',
+      "    res.setHeader('content-type', 'text/plain; charset=utf-8');",
+      "    res.end('xoboe server bundle failed to load');",
+      '    return;',
+      '  }',
+      "  __xoboeServer.emit('request', req, res);",
+      '}',
+      '',
+    ].join('\n');
+    retry('dist/server.js shim', () => {
+      writeFileSync(distServer, src + banner);
+      rmSync(distServer + '.br', { force: true });
+      rmSync(distServer + '.gz', { force: true });
+    });
+    console.log('[build] appended Vercel handler shim to dist/server.js');
+  }
 }
 
 console.log('[build] done');
