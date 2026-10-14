@@ -11,6 +11,6 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["xoboe/**/*"],
+  "include": ["xoboe/**/*", "tools/**/*"],
   "exclude": ["node_modules", "dist"]
 }
